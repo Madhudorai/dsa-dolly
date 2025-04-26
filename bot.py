@@ -91,16 +91,28 @@ async def submit(ctx, *, problem_title: str):
     user_id = ctx.author.id
     problem_lower = problem_title.lower()
     found = False
+
     for index, row in problems_df.iterrows():
         if row['title'].lower() == problem_lower:
             found = True
+            difficulty = row['difficulty'] if 'difficulty' in row else 'Easy'
+
+            # Award points based on difficulty
+            point_map = {
+                "Easy": 10,
+                "Medium": 20,
+                "Hard": 30
+            }
+            points = point_map.get(difficulty, 10)  # Default to 10 if not found
+
             if not submissions[user_id][row['title']]:
                 submissions[user_id][row['title']] = True
-                leaderboard[user_id] += 1
-                await ctx.send(f"{ctx.author.mention} submitted a solution for '{row['title']}'. Your score is now {leaderboard[user_id]}.")
+                leaderboard[user_id] += points
+                await ctx.send(f"{ctx.author.mention} submitted '{row['title']}' ({difficulty}) — +{points} points! Your total is now {leaderboard[user_id]}.")
             else:
-                await ctx.send(f"{ctx.author.mention}, you have already submitted a solution for '{row['title']}'.")
+                await ctx.send(f"{ctx.author.mention}, you have already submitted '{row['title']}' today.")
             break
+
     if not found:
         await ctx.send(f"Problem with title '{problem_title}' not found in the current problem set.")
 

@@ -10,7 +10,7 @@ import asyncio
 from collections import defaultdict
 
 load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
+TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 KAGGLE_DATASET_PATH = 'leetcode_problems.csv'
 
 intents = discord.Intents.default()

@@ -193,20 +193,72 @@ async def set_daily_config(ctx, num_questions: int, difficulty: str, *topics):
             await ctx.send(f"Invalid difficulty: '{diff}'. Please choose from {', '.join(valid_difficulties)}.")
             return
 
+    # Now validate topics also
+    all_topics = set()
+    if 'related_topics' in problems_df.columns:
+        topics_series = problems_df['related_topics'].dropna()
+        for entry in topics_series:
+            these_topics = [t.strip().lower() for t in entry.split(',')]
+            all_topics.update(these_topics)
+
+    invalid_topics = []
+    if topics:
+        for topic in topics:
+            if topic.lower() not in all_topics and topic.lower() != "all":
+                invalid_topics.append(topic)
+
+    if invalid_topics:
+        sorted_topics = sorted(all_topics)
+        await ctx.send(f"Invalid topics: {', '.join(invalid_topics)}.\nHere are the valid topics:\n" + ", ".join(sorted_topics))
+        return
+
+    # If "all" is given as topic, treat it like empty (no filtering)
+    final_topics = [] if ("all" in [t.lower() for t in topics]) else list(topics)
+
     daily_configs[ctx.guild.id] = {
         'num_questions': num_questions,
         'difficulty': difficulty_list,
-        'topics': list(topics),
+        'topics': final_topics,
         'channel_id': ctx.channel.id
     }
 
-    await ctx.send(f"Daily config set to {num_questions} {', '.join(difficulty_list)} problem(s) with topics: {', '.join(topics) if topics else 'All'} in this channel.")
+    await ctx.send(f"Daily config set to {num_questions} {', '.join(difficulty_list)} problem(s) with topics: {', '.join(final_topics) if final_topics else 'All'} in this channel.")
 
     # Automatically send problems right after setting config
-    await _send_problems(ctx.channel, num_questions, difficulty_list, list(topics))
+    await _send_problems(ctx.channel, num_questions, difficulty_list, final_topics)
 
 @bot.command(name='hello', help='Says hello!')
 async def hello(ctx):
     await ctx.send(f'Hello {ctx.author.mention}!')
+
+@bot.command(name='topics', help='Show available topics parsed from the dataset')
+async def topics_cmd(ctx):
+    global problems_df
+
+    if problems_df is None or 'related_topics' not in problems_df.columns:
+        await ctx.send("Problem dataset not loaded yet or doesn't have related topics.")
+        return
+
+    all_topics = set()
+    topics_series = problems_df['related_topics'].dropna()
+    for entry in topics_series:
+        topics = [t.strip().lower() for t in entry.split(',')]
+        all_topics.update(topics)
+
+    sorted_topics = sorted(all_topics)
+
+    if not sorted_topics:
+        await ctx.send("No topics found in the dataset.")
+        return
+
+    # Discord 2000 character limit, split if too long
+    message = "**Available Topics:**\n" + ", ".join(sorted_topics)
+
+    if len(message) > 1900:
+        parts = [", ".join(sorted_topics[i:i+30]) for i in range(0, len(sorted_topics), 30)]
+        for part in parts:
+            await ctx.send("**Available Topics:**\n" + part)
+    else:
+        await ctx.send(message)
 
 bot.run(TOKEN)

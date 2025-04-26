@@ -69,14 +69,35 @@ async def _send_problems(channel, num_questions, difficulty, topics):
     else:
         selected_problems = filtered_problems.sample(num_questions)
 
-    # 🌟 ADD selected problems to today's problems
+    # ADD selected problems to today's problems
     daily_problems[channel.guild.id].extend([row['title'] for _, row in selected_problems.iterrows()])
 
-    embed = discord.Embed(title="Today's LeetCode Challenge!", color=discord.Color.blue())
-    for index, row in selected_problems.iterrows():
-        problem_title = row['title']
-        problem_url = row['url']
-        embed.add_field(name=problem_title, value=f"[Solve it here]({problem_url})", inline=False)
+    # NOW instead of showing just selected problems, show all today's problems
+    embed = discord.Embed(title="Today's Full LeetCode Challenge Set!", color=discord.Color.blue())
+    for title in daily_problems[channel.guild.id]:
+        # find URL for each title
+        url_row = problems_df[problems_df['title'] == title]
+        if not url_row.empty:
+            problem_url = url_row.iloc[0]['url']
+            embed.add_field(name=title, value=f"[Solve it here]({problem_url})", inline=False)
+
+    await channel.send(embed=embed)
+    
+async def show_today_problems(channel):
+    global problems_df, daily_problems
+
+    today_sent_problems = daily_problems.get(channel.guild.id, [])
+
+    if not today_sent_problems:
+        await channel.send("No problems have been sent yet for today.")
+        return
+
+    embed = discord.Embed(title="Today's Full LeetCode Challenge Set!", color=discord.Color.blue())
+    for title in today_sent_problems:
+        url_row = problems_df[problems_df['title'] == title]
+        if not url_row.empty:
+            problem_url = url_row.iloc[0]['url']
+            embed.add_field(name=title, value=f"[Solve it here]({problem_url})", inline=False)
     await channel.send(embed=embed)
 
 async def send_daily_problems():
@@ -156,16 +177,9 @@ async def commands_cmd(ctx):
         embed.add_field(name=f"!{command.name}", value=command.help, inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name='send_now', help='Immediately sends the daily LeetCode problems based on the current configuration.')
-async def send_now(ctx):
-    config = daily_configs.get(ctx.guild.id)
-    if config:
-        num_questions = config.get('num_questions', 1)
-        difficulty = config.get('difficulty', ['Easy'])
-        topics = config.get('topics', [])
-        await _send_problems(ctx.channel, num_questions, difficulty, topics)
-    else:
-        await ctx.send("No daily configuration set for this server. Use `!set_daily_config` first.")
+@bot.command(name='show_now', help='Resend today\'s already picked LeetCode problems.')
+async def show_now(ctx):
+    await show_today_problems(ctx.channel)
 
 @bot.command(name='set_daily_config', help='Set the daily problem configuration: !set_daily_config <number> <difficulty> [topics]')
 async def set_daily_config(ctx, num_questions: int, difficulty: str, *topics):

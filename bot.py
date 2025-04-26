@@ -71,6 +71,7 @@ async def on_ready():
 
 @bot.command()
 async def daily(ctx):
+    generate_daily_questions() 
     today = datetime.date.today().isoformat()
     daily = load_json(DAILY_FILE)
 

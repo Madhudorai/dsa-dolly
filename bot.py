@@ -21,6 +21,7 @@ problems_df = None
 daily_configs = {}
 leaderboard = defaultdict(int)  # Store user scores (user_id: score)
 submissions = defaultdict(lambda: defaultdict(bool)) # Store submissions (user_id: {problem_title: submitted})
+daily_problems = defaultdict(list)  # {guild_id: [problem_title1, problem_title2, ...]}
 
 @bot.event
 async def on_ready():
@@ -44,7 +45,8 @@ async def on_ready():
     bot.loop.create_task(scheduler_loop())
 
 async def _send_problems(channel, num_questions, difficulty, topics):
-    global problems_df
+    global problems_df, daily_problems
+
     if problems_df is None:
         await channel.send("Problem dataset not loaded yet.")
         return
@@ -67,6 +69,9 @@ async def _send_problems(channel, num_questions, difficulty, topics):
     else:
         selected_problems = filtered_problems.sample(num_questions)
 
+    # 🌟 ADD selected problems to today's problems
+    daily_problems[channel.guild.id].extend([row['title'] for _, row in selected_problems.iterrows()])
+
     embed = discord.Embed(title="Today's LeetCode Challenge!", color=discord.Color.blue())
     for index, row in selected_problems.iterrows():
         problem_title = row['title']
@@ -87,34 +92,50 @@ async def send_daily_problems():
 
 @bot.command(name='submit', help='Submit your solution for a given problem: !submit <problem_title>')
 async def submit(ctx, *, problem_title: str):
-    global leaderboard, submissions
+    global leaderboard, submissions, daily_problems
     user_id = ctx.author.id
     problem_lower = problem_title.lower()
-    found = False
 
+    # Validate if problem was sent today
+    today_sent_problems = daily_problems.get(ctx.guild.id, [])
+    if not any(problem_lower == p.lower() for p in today_sent_problems):
+        await ctx.send(f"'{problem_title}' was not part of today's challenge. Only today's problems are allowed!")
+        return
+
+    found = False
     for index, row in problems_df.iterrows():
         if row['title'].lower() == problem_lower:
             found = True
             difficulty = row['difficulty'] if 'difficulty' in row else 'Easy'
 
-            # Award points based on difficulty
+            # Award points
             point_map = {
                 "Easy": 10,
                 "Medium": 20,
                 "Hard": 30
             }
-            points = point_map.get(difficulty, 10)  # Default to 10 if not found
+            points = point_map.get(difficulty, 10)
 
             if not submissions[user_id][row['title']]:
                 submissions[user_id][row['title']] = True
                 leaderboard[user_id] += points
-                await ctx.send(f"{ctx.author.mention} submitted '{row['title']}' ({difficulty}) — +{points} points! Your total is now {leaderboard[user_id]}.")
+                await ctx.send(f"{ctx.author.mention} submitted '{row['title']}' ({difficulty}) — +{points} points! Total: {leaderboard[user_id]}.")
             else:
-                await ctx.send(f"{ctx.author.mention}, you have already submitted '{row['title']}' today.")
+                await ctx.send(f"{ctx.author.mention}, you already submitted '{row['title']}' today.")
             break
 
     if not found:
-        await ctx.send(f"Problem with title '{problem_title}' not found in the current problem set.")
+        await ctx.send(f"Problem with title '{problem_title}' not found in dataset.")
+        
+@bot.command(name='delete_today', help='Delete today\'s sent problems and reset submissions.')
+async def delete_today(ctx):
+    global daily_problems
+
+    if ctx.guild.id in daily_problems:
+        del daily_problems[ctx.guild.id]
+        await ctx.send("Today's problems have been deleted! No submissions allowed now until new problems are sent.")
+    else:
+        await ctx.send("No problems were set for today yet.")
 
 @bot.command(name='leaderboard', help='View the LeetCode leaderboard.')
 async def leaderboard_cmd(ctx):
@@ -148,8 +169,11 @@ async def send_now(ctx):
 
 @bot.command(name='set_daily_config', help='Set the daily problem configuration: !set_daily_config <number> <difficulty> [topics]')
 async def set_daily_config(ctx, num_questions: int, difficulty: str, *topics):
+    global daily_configs
+
     difficulty_list = [d.strip().capitalize() for d in difficulty.split(',')]
     valid_difficulties = problems_df['difficulty'].unique() if problems_df is not None else ["Easy", "Medium", "Hard"]
+
     for diff in difficulty_list:
         if diff not in valid_difficulties:
             await ctx.send(f"Invalid difficulty: '{diff}'. Please choose from {', '.join(valid_difficulties)}.")
@@ -161,7 +185,11 @@ async def set_daily_config(ctx, num_questions: int, difficulty: str, *topics):
         'topics': list(topics),
         'channel_id': ctx.channel.id
     }
+
     await ctx.send(f"Daily config set to {num_questions} {', '.join(difficulty_list)} problem(s) with topics: {', '.join(topics) if topics else 'All'} in this channel.")
+
+    # Automatically send problems right after setting config
+    await _send_problems(ctx.channel, num_questions, difficulty_list, list(topics))
 
 @bot.command(name='hello', help='Says hello!')
 async def hello(ctx):

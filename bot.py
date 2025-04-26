@@ -1,140 +1,158 @@
-
 import discord
 from discord.ext import commands
-import json
 import os
-import datetime
 from dotenv import load_dotenv
-from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
-from keep_alive import keep_alive
-from leetcode import get_questions
+import pandas as pd
+import random
+import schedule
+import time
+import asyncio
+from collections import defaultdict
 
-# Load token
 load_dotenv()
-TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+TOKEN = os.getenv('DISCORD_TOKEN')
+KAGGLE_DATASET_PATH = 'leetcode_problems.csv'
 
-# Setup bot
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-SCORES_FILE = "scores.json"
-DAILY_FILE = "daily_log.json"
-USER_ACTIVITY_FILE = "user_activity.json"
-
-def load_json(path): return json.load(open(path)) if os.path.exists(path) else {}
-def save_json(path, data): json.dump(data, open(path, "w"), indent=4)
-
-def save_scores(scores): save_json(SCORES_FILE, scores)
-def load_scores(): return load_json(SCORES_FILE)
-
-# === Question Scheduling ===
-def generate_daily_questions():
-    today = datetime.date.today().isoformat()
-    daily = load_json(DAILY_FILE)
-
-    if today not in daily:
-        qset = get_questions()
-        daily[today] = {str(i+1): q for i, q in enumerate(qset)}
-        save_json(DAILY_FILE, daily)
-        print(f"Generated daily questions for {today}")
-
-# Run once at start in case bot started after 12 AM
-generate_daily_questions()
-
-# Schedule to run at 12 AM every day
-
-# === Idle Penalty System ===
-def apply_idle_penalties():
-    today = datetime.date.today().isoformat()
-    activity = load_json(USER_ACTIVITY_FILE)
-    scores = load_json(SCORES_FILE)
-
-    for user, data in activity.items():
-        if data.get("last_done") != today:
-            scores[user] = max(0, scores.get(user, 0) - 2)
-
-    save_json(SCORES_FILE, scores)
-    print("Idle penalties applied.")
-
-scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Kolkata'))
-scheduler.add_job(generate_daily_questions, 'cron', hour=0, minute=0)
-scheduler.add_job(apply_idle_penalties, 'cron', hour=23, minute=59)
-scheduler.start()
-
-scores = load_scores()
+problems_df = None
+daily_configs = {}
+leaderboard = defaultdict(int)  # Store user scores (user_id: score)
+submissions = defaultdict(lambda: defaultdict(bool)) # Store submissions (user_id: {problem_title: submitted})
 
 @bot.event
 async def on_ready():
-    print(f"Bot is ready! Logged in as {bot.user}")
+    global problems_df
+    try:
+        problems_df = pd.read_csv(KAGGLE_DATASET_PATH)
+        print(f'Loaded {len(problems_df)} problems from the dataset.')
+        print("Column Names:", problems_df.columns.tolist())
+    except FileNotFoundError:
+        print(f"Error: Dataset file not found at {KAGGLE_DATASET_PATH}")
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
 
-@bot.command()
-async def daily(ctx):
-    generate_daily_questions() 
-    today = datetime.date.today().isoformat()
-    daily = load_json(DAILY_FILE)
+    schedule.every().day.at("10:00").do(lambda: asyncio.run(send_daily_problems()))
 
-    if today not in daily:
-        await ctx.send("Questions not generated yet for today.")
+    async def scheduler_loop():
+        while True:
+            schedule.run_pending()
+            await asyncio.sleep(1)
+
+    bot.loop.create_task(scheduler_loop())
+
+async def _send_problems(channel, num_questions, difficulty, topics):
+    global problems_df
+    if problems_df is None:
+        await channel.send("Problem dataset not loaded yet.")
         return
 
-    qset = daily[today]
-    await ctx.send(f"Today's DSA Challenge:\n1. <{qset['1']}>\n2. <{qset['2']}>\n3. <{qset['3']}>")
+    filtered_problems = problems_df[problems_df['difficulty'].isin(difficulty)]
 
-@bot.command()
-async def done(ctx, qnum: str):
-    user = str(ctx.author)
-    today = datetime.date.today().isoformat()
-    daily = load_json(DAILY_FILE)
-    activity = load_json(USER_ACTIVITY_FILE)
+    if topics:
+        filtered_problems = filtered_problems[
+            filtered_problems['related_topics'].apply(
+                lambda x: any(topic.lower() in x.lower().split(',') for topic in topics) if pd.notna(x) else False
+            )
+        ]
 
-    if today not in daily or qnum not in daily[today]:
-        await ctx.send("Invalid question number or daily not yet posted.")
+    if filtered_problems.empty:
+        await channel.send("No problems found matching the current configuration.")
         return
 
-    if user not in activity:
-        activity[user] = {"last_done": today, "done_today": []}
+    if len(filtered_problems) < num_questions:
+        selected_problems = filtered_problems.sample(len(filtered_problems))
+    else:
+        selected_problems = filtered_problems.sample(num_questions)
 
-    if activity[user]["last_done"] != today:
-        activity[user]["last_done"] = today
-        activity[user]["done_today"] = []
+    embed = discord.Embed(title="Today's LeetCode Challenge!", color=discord.Color.blue())
+    for index, row in selected_problems.iterrows():
+        problem_title = row['title']
+        problem_url = row['url']
+        embed.add_field(name=problem_title, value=f"[Solve it here]({problem_url})", inline=False)
+    await channel.send(embed=embed)
 
-    if qnum in activity[user]["done_today"]:
-        await ctx.send(f"You already completed Q{qnum} today!")
+async def send_daily_problems():
+    for guild_id, config in daily_configs.items():
+        num_questions = config.get('num_questions', 1)
+        difficulty = config.get('difficulty', ['Easy'])
+        topics = config.get('topics', [])
+        channel_id = config.get('channel_id')
+        if not channel_id:
+            continue
+        channel = bot.get_channel(channel_id)
+        await _send_problems(channel, num_questions, difficulty, topics)
+
+@bot.command(name='submit', help='Submit your solution for a given problem: !submit <problem_title>')
+async def submit(ctx, *, problem_title: str):
+    global leaderboard, submissions
+    user_id = ctx.author.id
+    problem_lower = problem_title.lower()
+    found = False
+    for index, row in problems_df.iterrows():
+        if row['title'].lower() == problem_lower:
+            found = True
+            if not submissions[user_id][row['title']]:
+                submissions[user_id][row['title']] = True
+                leaderboard[user_id] += 1
+                await ctx.send(f"{ctx.author.mention} submitted a solution for '{row['title']}'. Your score is now {leaderboard[user_id]}.")
+            else:
+                await ctx.send(f"{ctx.author.mention}, you have already submitted a solution for '{row['title']}'.")
+            break
+    if not found:
+        await ctx.send(f"Problem with title '{problem_title}' not found in the current problem set.")
+
+@bot.command(name='leaderboard', help='View the LeetCode leaderboard.')
+async def leaderboard_cmd(ctx):
+    if not leaderboard:
+        await ctx.send("The leaderboard is currently empty.")
         return
+    sorted_leaderboard = sorted(leaderboard.items(), key=lambda item: item[1], reverse=True)
+    embed = discord.Embed(title="LeetCode Leaderboard", color=discord.Color.gold())
+    for rank, (user_id, score) in enumerate(sorted_leaderboard, 1):
+        user = await bot.fetch_user(user_id)
+        embed.add_field(name=f"#{rank} {user.name}", value=f"Score: {score}", inline=False)
+    await ctx.send(embed=embed)
 
-    point_map = {"1": 10, "2": 10, "3": 10}
-    points = point_map.get(qnum, 0)
+@bot.command(name='commands', help='Shows information about the bot\'s commands.')
+async def commands_cmd(ctx):
+    embed = discord.Embed(title="LeetCode Bot Commands", description="Here's a list of available commands:", color=discord.Color.green())
+    for command in bot.commands:
+        embed.add_field(name=f"!{command.name}", value=command.help, inline=False)
+    await ctx.send(embed=embed)
 
-    scores[user] = scores.get(user, 0) + points
-    activity[user]["done_today"].append(qnum)
-    save_scores(scores)
-    save_json(USER_ACTIVITY_FILE, activity)
+@bot.command(name='send_now', help='Immediately sends the daily LeetCode problems based on the current configuration.')
+async def send_now(ctx):
+    config = daily_configs.get(ctx.guild.id)
+    if config:
+        num_questions = config.get('num_questions', 1)
+        difficulty = config.get('difficulty', ['Easy'])
+        topics = config.get('topics', [])
+        await _send_problems(ctx.channel, num_questions, difficulty, topics)
+    else:
+        await ctx.send("No daily configuration set for this server. Use `!set_daily_config` first.")
 
-    await ctx.send(f"{ctx.author.mention} completed Q{qnum} (+{points} pts) — Total: {scores[user]}")
+@bot.command(name='set_daily_config', help='Set the daily problem configuration: !set_daily_config <number> <difficulty> [topics]')
+async def set_daily_config(ctx, num_questions: int, difficulty: str, *topics):
+    difficulty_list = [d.strip().capitalize() for d in difficulty.split(',')]
+    valid_difficulties = problems_df['difficulty'].unique() if problems_df is not None else ["Easy", "Medium", "Hard"]
+    for diff in difficulty_list:
+        if diff not in valid_difficulties:
+            await ctx.send(f"Invalid difficulty: '{diff}'. Please choose from {', '.join(valid_difficulties)}.")
+            return
 
-@bot.command()
-async def leaderboard(ctx):
-    if not scores:
-        await ctx.send("No scores yet!")
-        return
+    daily_configs[ctx.guild.id] = {
+        'num_questions': num_questions,
+        'difficulty': difficulty_list,
+        'topics': list(topics),
+        'channel_id': ctx.channel.id
+    }
+    await ctx.send(f"Daily config set to {num_questions} {', '.join(difficulty_list)} problem(s) with topics: {', '.join(topics) if topics else 'All'} in this channel.")
 
-    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
-    board = "\n".join(f"{u}: {s} pts" for u, s in sorted_scores)
-    await ctx.send(f"Leaderboard:\n{board}")
+@bot.command(name='hello', help='Says hello!')
+async def hello(ctx):
+    await ctx.send(f'Hello {ctx.author.mention}!')
 
-
-@bot.command(name="info", help="Show bot command guide and scoring rules")
-async def info(ctx):
-    message = (
-        "** DSAdolly – daily DSA practice overseeing queen**\n\n"
-        "**🗓️ !daily** – Get today's 3 randomly chosen LeetCode questions\n\n"
-        "**✅ !done 1 / !done 2 / !done 3 – Mark question 1/2/3 as completed (each = +10 pts)\n\n🏆 **!leaderboard** – View everyone's score\n\n"
-        "_⏱️ -2 pts if you skip a day without solving_\n"
-        "_Questions reset at 12:00 AM IST every day_"
-    )
-    await ctx.send(message)
-
-keep_alive()
 bot.run(TOKEN)
